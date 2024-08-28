@@ -44,66 +44,45 @@ def index():
 <!DOCTYPE html>
 <html>
 <meta http-equiv="refresh" content="10">
-<header>
-    <h1>Welcome to ImageFlow Website Based on Kafka</h1> 
-</header>
 <head>
-<style>
-.container {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  grid-auto-rows: minmax(100px, auto);
-  gap: 20px;
-}
-img {
-   display: block;
-   max-width:100%;
-   max-height:100%;
-   margin-left: auto;
-   margin-right: auto;
-}
-.img {
-   height: 270px;
-}
-.label {
-   height: 30px;
-  text-align: center;
-}
-</style>
+    <title>ImageFlow - Kafka Powered</title>
+    <style>
+        .container { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; }
+        .img { height: 270px; }
+        .label { text-align: center; height: 30px; }
+        img { display: block; max-width:100%; max-height:100%; margin: auto; }
+    </style>
 </head>
 <body>
-<form method="post" enctype="multipart/form-data">
-  <div>
-    <label for="file">Choose file to upload</label>
-    <input type="file" id="file" name="file" accept="image/x-png,image/gif,image/jpeg" />
-  </div>
-  <div>
-    <button>Submit</button>
-  </div>
-</form>
-<div class="container">
-{% for image in images %}
-<div>
-<div class="img"><img src="/images/{{ image.filename }}"></img></div>
-<div class="label">{{ image.object | default('un-defined', true) }}</div>
-</div>
-{% endfor %}
-</div>
+    <h1>Welcome to ImageFlow Website</h1> 
+    <form method="post" enctype="multipart/form-data">
+        <label for="file">Choose file to upload</label>
+        <input type="file" id="file" name="file" accept="image/x-png,image/gif,image/jpeg" required/>
+        <button type="submit">Submit</button>
+    </form>
+    <div class="container">
+    {% for image in images %}
+        <div>
+            <div class="img"><img src="/images/{{ image.filename }}" alt="Image"></div>
+            <div class="label">{{ image.object | default('un-defined', true) }}</div>
+        </div>
+    {% endfor %}
+    </div>
 </body>
 </html>
     """, images=images)
-    
+
 @app.route('/images/<path:path>', methods=['GET'])
 def image(path):
     return send_from_directory(IMAGES_DIR, path)
 
 @app.route('/object/<id>', methods=['PUT'])
 def set_object(id):
+    """Update the object label of an image by ID."""
     con = get_db_connection()
-    cur = con.cursor()
     json_data = request.json
-    object_value = json_data['object']
-    cur.execute("UPDATE image SET object = ? WHERE id = ?", (object_value, id))
+    object_value = json_data.get('object', '')
+    con.execute("UPDATE image SET object = ? WHERE id = ?", (object_value, id))
     con.commit()
     con.close()
     return '{"status": "OK"}'
@@ -111,49 +90,48 @@ def set_object(id):
 
 @app.route('/', methods=['POST'])
 def upload_file():
+    """Handle file upload, processing, and Kafka message production."""
     f = request.files['file']
-
+    
+    # Decode the image
     file_bytes = np.frombuffer(f.read(), np.uint8)
     image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
     if image is None:
-
+        # If the file is not a valid image
         return render_template_string("""
         <script>
         alert("Failed to upload: The file is not a valid image.");
         window.location.href = "/";
         </script>
         """)
-
     else:
-        ext = 'jpeg'
-        id = uuid.uuid4().hex
-        filename = "{}.{}".format(id, ext)
+        # Save the valid image to disk and record in the database
+        filename = f"{uuid.uuid4().hex}.jpeg"
         filepath = os.path.join(IMAGES_DIR, filename)
+        cv2.imwrite(filepath, image)
 
-  
-        cv2.imwrite(filepath, image)  
-     
+        # Insert into the database
         con = get_db_connection()
-        cur = con.cursor()
-        cur.execute("INSERT INTO image (id, filename, object) VALUES (?, ?, ?)", (id, filename, ""))
+        con.execute("INSERT INTO image (id, filename, object) VALUES (?, ?, ?)", 
+                    (uuid.uuid4().hex, filename, ""))
         con.commit()
 
-        producer.produce(topic, key=id, value=json.dumps({"id": id, "status": "completed"}))
+        # Produce Kafka message
+        producer.produce(TOPIC, key=filename, value=json.dumps({"filename": filename, "status": "completed"}))
         producer.flush()
-        con.close()
 
+        # Confirmation
         return render_template_string("""
             <script>
             alert("File uploaded and processed successfully!");
             window.location.href = "/";
             </script>
-            """)
-   
+        """)
 
-
-@app.route('/messages')
+@app.route('/messages', methods=['GET'])
 def messages():
+    """Display Kafka error and completed messages."""
     data = consume_messages()
     return render_template_string("""
     <!DOCTYPE html>
@@ -161,20 +139,9 @@ def messages():
     <head>
         <title>Kafka Messages</title>
         <style>
-            .container {
-                padding: 20px;
-            }
-            .section {
-                margin-bottom: 20px;
-            }
-            .section h2 {
-                margin-bottom: 10px;
-            }
-            .message {
-                padding: 10px;
-                border: 1px solid #ccc;
-                margin-bottom: 5px;
-            }
+            .container { padding: 20px; }
+            .section { margin-bottom: 20px; }
+            .message { padding: 10px; border: 1px solid #ccc; margin-bottom: 5px; }
         </style>
     </head>
     <body>
@@ -197,4 +164,4 @@ def messages():
     """, data=data)
 
 if __name__ == '__main__':
-    app.run(debug=True, port=(int(sys.argv[1]) if len(sys.argv) > 1 else 5000))
+    app.run(debug=True, port=(int(sys.argv[1]) if len(sys.argv) > 1 else 500
